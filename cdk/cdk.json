@@ -75,6 +75,9 @@
     "@aws-cdk/aws-rds:setCorrectValueForDatabaseInstanceReadReplicaInstanceResourceId": true,
     "@aws-cdk/core:cfnIncludeRejectComplexResourceUpdateCreatePolicyIntrinsics": true,
     "@aws-cdk/aws-lambda-nodejs:sdkV3ExcludeSmithyPackages": true,
-    "@aws-cdk/aws-stepfunctions-tasks:fixRunEcsTaskPolicy": true
+    "@aws-cdk/aws-stepfunctions-tasks:fixRunEcsTaskPolicy": true,
+    "KMSKeyAliasName": "alias/code-signing-ecc-20241030",
+    "UploadsBucketName": "codesigning-demo-uploads-202410",
+    "ResultsBucketName": "codesigning-demo-results-202410"
   }
 }
