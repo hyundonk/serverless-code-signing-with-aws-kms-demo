@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>S3 File Uploader</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        #uploadStatus {
+            margin-top: 20px;
+            word-break: break-all;
+            color: #0066cc;
+            text-decoration: none;
+        }
+        #uploadStatus a:hover {
+            text-decoration: underline;
+        }
+    </style>
+</head>
+<body>
+    <h1>S3 File Uploader</h1>
+    <input type="file" id="fileInput">
+    <button onclick="uploadFile()">Upload</button>
+    <div id="uploadStatus"></div>
+    <div id="progressBar"><div></div></div>
+
+    <script>
+        const API_GATEWAY_URL = '{enter-your-InfraStack.ApiGatewayUrl-output-here}'
+
+        async function uploadFile() {
+            const fileInput = document.getElementById('fileInput');
+            const file = fileInput.files[0];
+
+            if (!file) {
+                statusDiv.textContent = 'Please select a file first.';
+                return;
+            }
+
+            const statusDiv = document.getElementById('uploadStatus');
+            const progressBarDiv = document.getElementById('progressBar').firstElementChild;
+
+            statusDiv.textContent = 'Requesting pre-signed URLs...';
+
+            const PART_SIZE = 5 * 1024 * 1024; // 5MB part size
+            const partCount = Math.ceil(file.size / PART_SIZE);
+
+            try {
+                // Get pre-signed URLs from API Gateway
+                const urlResponse = await fetch(`${API_GATEWAY_URL}initiate-upload?fileName=${encodeURIComponent(file.name)}&partCount=${partCount}`, {
+                    method: 'GET',
+                });
+
+                if (!urlResponse.ok) {
+                    throw new Error(`API request failed with status ${urlResponse.status}`);
+                }
+
+                const { uploadId, partUrls } = await urlResponse.json();
+
+                console.log(`uploadId: ${uploadId}`);
+
+                // Upload parts
+                const uploadPromises = [];
+
+                for (let i = 0; i < partUrls.length; i++) {
+                    const start = i * PART_SIZE;
+                    const end = Math.min(start + PART_SIZE, file.size);
+                    const part = file.slice(start, end);
+
+                    const uploadPromise = fetch(partUrls[i], {
+                        method: 'PUT',
+                        body: part
+                    }).then(response => {
+                        if (!response.ok) throw new Error(`Failed to upload part ${i + 1}`);
+                        return { 
+                            PartNumber: i + 1, 
+                            ETag: response.headers.get('ETag').replace(/"/g, '') };
+                    });
+                    uploadPromises.push(uploadPromise);
+                }
+
+                const uploadResults = await Promise.all(uploadPromises);
+
+                // Step 3: Complete the multipart upload
+                const xmlPayload = generateCompletionXml(uploadResults);
+                const completeResponse = await fetch(`${API_GATEWAY_URL}complete-upload`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        uploadId: uploadId,
+                        key: file.name,
+                        parts: uploadResults
+                    })
+                });
+
+                if (completeResponse.ok) {
+                    const result = await completeResponse.json();
+                    statusDiv.textContent = 'Upload completed successfully! ' + result.Location;
+                    console.log('completeResponse:', result);
+                } else {
+                    const errorText = await completeResponse.text();
+                    throw new Error(`Failed to complete multipart upload: ${errorText}`);
+                }
+
+                // Poll ${API_GATEWAY_URL}code-signing-status API every 3 seconds until it returns 200 OK with 'status' is 'completed'
+                // Start polling for code signing status
+                await pollCodeSigningStatus(file);
+
+            } catch (error) {
+                console.error('Upload failed:', error);
+                statusDiv.textContent = 'Upload failed: ' + error.message;
+            }
+        }
+
+        async function pollCodeSigningStatus(file) {
+            while (true) {
+                try {
+                    const response = await fetch(`${API_GATEWAY_URL}code-signing-status?objectKey=${encodeURIComponent(file.name)}`, {
+                        method: 'GET',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        }
+                    });
+
+                    if (response.status === 200) {
+                        const data = await response.json();
+                        if (data.status === 'completed') {
+                            console.log('Code signing completed successfully');
+
+                            // Update the existing uploadStatus element
+                            const uploadStatus = document.getElementById('uploadStatus');
+                            uploadStatus.innerHTML = `
+                                <div>Code signing completed</div>
+                                <div style="margin-top: 10px;">
+                                    <div>Signed file URL:</div>
+                                    <a href="${data.codeSignedUrl}" target="_blank" style="word-break: break-all; color: #0066cc; text-decoration: none;">${data.codeSignedUrl}</a>
+                                </div>
+                            `;
+
+                            // Hide the progress bar since the process is complete
+                            document.getElementById('progressBar').style.display = 'none';
+                            return;
+                        }
+
+                        // Update status for in-progress
+                        document.getElementById('uploadStatus').textContent = `Code signing status: ${data.status}`;
+                    } else {
+                        console.error('Server returned status:', response.status);
+                        throw new Error(`Server returned status: ${response.status}`);
+                    }
+
+                    // Wait for 3 seconds before next poll
+                    await new Promise(resolve => setTimeout(resolve, 3000));
+                } catch (error) {
+                    console.error('Error polling code signing status:', error);
+                    document.getElementById('uploadStatus').textContent = `Error checking code signing status: ${error.message}`;
+                    return;
+                }
+            }
+        }
+
+        function generateCompletionXml(parts) {
+            let xml = '<?xml version="1.0" encoding="UTF-8"?>\n<CompleteMultipartUpload>\n'; // Add XML declaration
+            for (const part of parts) {
+                xml += '  <Part>\n';  // Properly indent for readability
+                xml += `    <ETag>"${part.ETag}"</ETag>\n`;  // Include quotes around ETag value
+                xml += `    <PartNumber>${part.PartNumber}</PartNumber>\n`;  // Properly format PartNumber
+                xml += '  </Part>\n';  // Properly indent for readability
+            }
+            xml += '</CompleteMultipartUpload>';
+            return xml;
+        }
+    </script>
+</body>
+</html>
+
