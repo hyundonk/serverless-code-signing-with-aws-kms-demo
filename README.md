@@ -9,6 +9,8 @@ Amazon KMS 는 암호화 키를 생성, 제어를 위한 AWS 관리형 서비스
 
 아래는 데모 솔루션의 아키텍처 다이어그램입니다.
 
+Note) Please note that the architecture and implementation detail in this repo is for evaluating purpose only.
+
 ![image-20241031102221368](images/architecture-diagram.png)
 
 
