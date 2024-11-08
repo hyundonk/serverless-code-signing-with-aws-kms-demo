@@ -84,8 +84,8 @@ Usage:  docker [OPTIONS] COMMAND
 
 ```bash
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
-nvm install 18
-nvm use 18
+nvm install 16
+nvm use 16
 
 node -v
 v16.20.2
