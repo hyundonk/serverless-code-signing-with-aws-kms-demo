@@ -1,9 +1,18 @@
 # serverless-code-signing-with-aws-kms-demo
 This is demo implementation of application code signing solution with AWS KMS and AWS serverless services
 
+
+
+### Document history
+
+2024.11.11 
+
+- Replaced Step Function and ECS with AWS Lambda for code signing task
+- Use Amazon Linux 2023 instead of Amazon Linux 2 for detail implementation steps.
+
 # 개요
 
-본 문서에서는 어플리케이션 서명(Code Signing)을 위한 솔루션 데모 구현 내용을 설명합니다. 이 데모 솔루션은 https://sbstjn.com/blog/aws-serverless-code-signing-windows-extended-validation-kms/ 문서의 내용에 기반하여 구현하였습니다. 특히 AWS API Gateway를 통해 Code Signing을 위한 API를 추가하였고 Demo Frontend App을 통해 해당 API들을 활용하여 데모를 구현하였습니다. 또한 Code Signing 사용자 시나리오의 특성 상 가능한 사용자가 code signing을 요청할 때만 AWS 서비스 리소스들에 대한 과금이 발생하도록 AWS serverless 서비스들을 활용하여 비용을 최소화 할 수 있도록 구현하였습니다. 
+본 문서에서는 어플리케이션 서명(Code Signing)을 위한 솔루션 데모 구현 내용을 설명합니다. 이 데모 솔루션은 https://sbstjn.com/blog/aws-serverless-code-signing-windows-extended-validation-kms/ 문서의 내용에 기반하여 구현하였습니다. 기존 Step Function을 통해 Amazon ECS Task에서 수행했던 Code Signing Task를 AWS Lambda에서 수행하는 것으로 변경하였고 특히 AWS API Gateway를 통해 Code Signing을 위한 API를 추가하였고 Demo Frontend App을 통해 해당 API들을 활용하여 데모를 구현하였습니다. 또한 Code Signing 사용자 시나리오의 특성 상 가능한 사용자가 code signing을 요청할 때만 AWS 서비스 리소스들에 대한 과금이 발생하도록 AWS serverless 서비스들을 활용하여 비용을 최소화 할 수 있도록 구현하였습니다. 
 
 Amazon KMS 는 암호화 키를 생성, 제어를 위한 AWS 관리형 서비스로 FIPS 140-2 Security Level 3 인증을 획득한 하드웨어 보안 모듈(HSM)을 이용하여 암호화 키를 관리합니다. 본 예제에서는 AWS KMS 서비스를 접근할 때 FIPS 140-2를 준수하는 TLS endpoint를 사용하였습니다. 
 
@@ -11,13 +20,13 @@ Amazon KMS 는 암호화 키를 생성, 제어를 위한 AWS 관리형 서비스
 
 Note) Please note that the architecture and implementation detail in this repo is for evaluating purpose only.
 
-![image-20241031102221368](images/architecture-diagram.png)
+![image-20241111095045202](images/architecture-diagram.png)
 
 
 
 # 상세 구현 상세 절차
 
-아래는 데모 solution 구현 절차를 기술하였습니다. 서울 리전(ap-northeast-2)에서 amazon linux 2 instance를 개발머신으로 사용할 경우를 가정하고 기술합니다. 
+아래는 데모 solution 구현 절차를 기술하였습니다. 서울 리전(ap-northeast-2)에서 amazon linux 2023 instance를 개발머신으로 사용할 경우를 가정하고 기술합니다. 
 
 ## Pre-requisites
 
@@ -27,22 +36,13 @@ Note) Please note that the architecture and implementation detail in this repo i
 aws configure
 ```
 
-- Install git
+- Install git (Git is installed on Amazon Linux 2023 machines by default)
 
-```bash
-sudo yum install -y git
-```
-
-- Install openjdk-8-jdk ([Jsign](https://github.com/ebourg/jsign) requires Java 8 or higher)
+- Install java 21 JDK ([Jsign](https://github.com/ebourg/jsign) requires Java 8 or higher)
 
 ```
-sudo rpm --import https://yum.corretto.aws/corretto.key
-sudo curl -L -o /etc/yum.repos.d/corretto.repo https://yum.corretto.aws/corretto.repo
-sudo yum install -y java-1.8.0-amazon-corretto-devel
-java -version
-openjdk version "1.8.0_432"
-OpenJDK Runtime Environment Corretto-8.432.06.1 (build 1.8.0_432-b06)
-OpenJDK 64-Bit Server VM Corretto-8.432.06.1 (build 25.432-b06, mixed mode)
+sudo dnf install java-21-amazon-corretto-devel
+sudo dnf install java-21-amazon-corretto-jmods
 ```
 
 - Install maven (v3.2.5 or higher) for [Jsign](https://github.com/ebourg/jsign) build 
@@ -68,8 +68,10 @@ Apache Maven 3.6.3 (cecedd343002696d0abb50b32b541b8a6ba2883f)
 - Install docker
 
 ```bash
-sudo amazon-linux-extras install docker
-sudo service docker start
+sudo yum install docker -y
+sudo systemctl start docker
+sudo systemctl enable docker
+
 sudo usermod -a -G docker ec2-user
 
 # close current SSH terminal window and reconnect as new connection to run the docker command
@@ -84,11 +86,12 @@ Usage:  docker [OPTIONS] COMMAND
 
 ```bash
 curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.0/install.sh | bash
-nvm install 16
-nvm use 16
+source ~/.bashrc
+
+nvm install --lts
 
 node -v
-v16.20.2
+v22.11.0
 
 npm -g install typescript
 npm install -g aws-cdk
@@ -298,27 +301,20 @@ cd image/
 
 ### 2) Create handle.sh file 
 
-‘handle.sh’은 Docker 에서 수행할 command로 ECS task에서 수행되어 code signing을 수행합니다. 아래 내용의 handle.sh 파일을 생성합니다.
+‘handle.sh’은 Docker 에서 수행할 command로 AWS Lambda에서 수행되어 code signing을 수행합니다. 아래 내용의 handle.sh 파일을 생성합니다.
 
 ```
 #!/bin/bash
 
 # Download file from S3
 
-aws s3 cp s3://$BUCKET_UPLOADS/$FILE ./ || exit 1
+aws s3 cp s3://$BUCKET_UPLOADS/$FILE /tmp || exit 1
 
-# Configure jsign credentials from ENV or Fargate
-
-if [ -z "$AWS_EXECUTION_ENV" ]; then
-    AWS_AUTH="$AWS_ACCESS_KEY_ID|$AWS_SECRET_ACCESS_KEY|$AWS_SESSION_TOKEN"
-    echo "no AWS_EXECUTION_ENV. use access key"
-else
-    AWS_AUTH=$(curl 169.254.170.2$AWS_CONTAINER_CREDENTIALS_RELATIVE_URI | jq '.AccessKeyId+"|"+.SecretAccessKey+"|"+.Token')
-    echo "Use metadata"
-fi
+# Configure jsign credentials from ENV for AWS KMS Key
+AWS_AUTH="$AWS_ACCESS_KEY_ID|$AWS_SECRET_ACCESS_KEY|$AWS_SESSION_TOKEN"
 
 if [ "$AWS_AUTH" == "||" ]; then
-    echo "Failed to retrieve credentials."
+    echo "Failed to retrieve credentials." >&2
     exit 1
 fi
 
@@ -330,35 +326,36 @@ if ! AWS_USE_FIPS_ENDPOINT=true java -jar jsign.jar \
     --storepass "$AWS_AUTH" \
     --alias "$KMS_KEY_ID" \
     --tsaurl http://timestamp.sectigo.com \
-    --certfile certificate.cer $FILE; then
+    --certfile certificate.cer /tmp/$FILE; then
+    echo "Failed sign... exiting" >&2
     exit 1
 fi
 
 # Verify signature
 
-SIGNATURE_FAILED=$(osslsigncode verify -in ./$FILE -CAfile ./chain.pem | grep -c "Signature verification: failed")
+SIGNATURE_FAILED=$(osslsigncode verify -in /tmp/$FILE -CAfile ./chain.pem | grep -c "Signature verification: failed")
 if [ "$SIGNATURE_FAILED" == 1 ]; then
-    echo "Failed to verify signature."
+    echo "Failed to verify signature." >&2
     exit 1
 fi
 
 # Calculate checksum for signed binary
 
-CHECKSUM=$(openssl dgst -sha256 -binary "$FILE" | openssl base64 -A)
+CHECKSUM=$(openssl dgst -sha256 -binary "/tmp/$FILE" | openssl base64 -A)
 
 # Upload signed binary to S3
 
 aws s3api put-object \
     --bucket "$BUCKET_RESULTS" \
     --key "$FILE" \
-    --body "$FILE" \
+    --body "/tmp/$FILE" \
     --checksum-algorithm SHA256 \
     --checksum-sha256 "$CHECKSUM" || exit 1
 
 CODESIGNED_URL="https://$BUCKET_RESULTS.s3.$AWS_REGION.amazonaws.com/$FILE"
-echo "Signed file uploaded successfully to ${CODESIGNED_URL}"
+echo "Signed file uploaded successfully to ${CODESIGNED_URL}" >&1
 
-echo "Update DynamoDB table with primary key $FILE in $AWS_REGION region"
+echo "Update DynamoDB table with primary key $FILE in $AWS_REGION region" >&1
 
 # Update DynamoDB table
 aws dynamodb update-item \
@@ -378,37 +375,94 @@ aws dynamodb update-item \
     --region $AWS_REGION
 
 if [ $? -eq 0 ]; then
-    echo "DynamoDB table updated successfully"
+    echo "DynamoDB table updated successfully" >&1
 else
-    echo "Failed to update DynamoDB table"
+    echo "Failed to update DynamoDB table" >&2
 fi
 
 # Delete unsigned binary from S3
 
 aws s3 rm s3://$BUCKET_UPLOADS/$FILE || exit
+#tail -f /dev/null # for debug purpose only
 ```
 
-### 3) Prepare Dockerfile
+### 3) Create startup.sh file 
+
+‘startup.sh’은 container 내에서 Lambda runtime API를 통해 Lambda에서 수신한 event를  정보를 접근하고 event를 처리한 후 결과를 return해주는 script입니다. 앞의 'handle.sh'도 'startup.sh'에서 호출합니다. 
+
+```bash
+#!/bin/bash
+set -euo pipefail
+
+# This is the handler that Lambda will invoke
+handler_name="handle.handler"
+
+###############################################################
+# The container initializes before processing the invocations #
+###############################################################
+
+
+###############################################
+# Processing the invocations in the container #
+###############################################
+
+while true
+do
+  # Create a temporary file
+  HEADERS="$(mktemp)"
+  # Get an event. The HTTP request will block until one is received
+  EVENT_DATA=$(curl -sS -LD "$HEADERS" -X GET "http://${AWS_LAMBDA_RUNTIME_API}/2018-06-01/runtime/invocation/next")
+  echo "event data: $EVENT_DATA"
+
+  # Extract request ID by scraping response headers received above
+  REQUEST_ID=$(grep -Fi Lambda-Runtime-Aws-Request-Id "$HEADERS" | tr -d '[:space:]' | cut -d: -f2)
+  echo "request id: $REQUEST_ID"
+
+
+  export FILE=$(echo "$EVENT_DATA" | jq -r '.detail.object.key')
+  echo "FILE: $FILE"
+
+  RESPONSE=""
+  if [ ! -z "$FILE" ]; then
+    RESPONSE=$(/var/task/handle.sh 2>&1 | tee /dev/stderr)
+  fi
+
+  # Send the response
+  curl -X POST "http://${AWS_LAMBDA_RUNTIME_API}/2018-06-01/runtime/invocation/$REQUEST_ID/response" -d "{\"statusCode\": 200, \"body\": \"$RESPONSE\"}"
+done
+```
+
+
+
+### 4) Prepare Dockerfile
 
 아래 Dockerfile을 생성합니다. 
 
 
 
-```
+```yaml
 cat > Dockerfile << EOF
-FROM alpine:3
+FROM public.ecr.aws/lambda/provided:al2023
 
-# Update and install necessary packages
-
-RUN apk update && \
-    apk upgrade && \
-    apk add ca-certificates && \
-    update-ca-certificates && \
-    apk add --update coreutils build-base bash jq cmake openssl-dev curl-dev git aws-cli openjdk11 make curl openssl && \
-    rm -rf /var/cache/apk/*
+RUN microdnf update -y && \
+    microdnf install -y ca-certificates  \
+                 gcc \
+                   gcc-c++ \
+                   make \
+                   bash \
+                   jq \
+                   cmake \
+                   openssl-devel \
+                   libcurl-devel \
+                   git \
+                   awscli \
+                   java-21-amazon-corretto \
+                   openssl \
+                   zlib-devel && \
+    microdnf clean all && \
+    rm -rf /var/cache/dnf
 
 # Install osslsigncode
-
 RUN git clone https://github.com/mtrojnar/osslsigncode.git && \
     cd osslsigncode && \
     mkdir build && \
@@ -416,14 +470,16 @@ RUN git clone https://github.com/mtrojnar/osslsigncode.git && \
     cmake .. && \
     make && \
     make install && \
+    cd / && \
     rm -rf ./osslsigncode
 
 # Copy local files
+COPY startup.sh handle.sh jsign.jar certificate.cer chain.pem /var/task/
 
-COPY . ./
+RUN chmod +x /var/task/startup.sh /var/task/handle.sh
 
 # Run script
-CMD ["bash", "handle.sh"]
+ENTRYPOINT /var/task/startup.sh
 EOF
 ```
 
@@ -437,7 +493,7 @@ cp ../chain.pem ./
 cp ../jsign/jsign/target/jsign-7.0-SNAPSHOT.jar ./jsign.jar
 ```
 
-### 3) Build the container image and create a ECR Repo and Upload the container image to the repo.
+### 5) Build the container image and create a ECR Repo and Upload the container image to the repo.
 
 Create a ECR Repo and upload the newly created docker image.
 
@@ -528,8 +584,17 @@ InfraStack.bucketResults = xxxxxxxx-results-xxxxxx
 
 ## 5. Test with frontend application
 
-아래의 링크에 예제 Frontend 어플리케이션이 포함되어 있습니다. 로컬 머신에 다운로드 합니다. 
-https://github.com/hyundonk/serverless-code-signing-with-aws-kms-demo/blob/main/frontend/index.html
+아래의 링크에 예제 Frontend 어플리케이션이 포함되어 있습니다. 로컬 머신에 다운로드 합니다. https://github.com/hyundonk/serverless-code-signing-with-aws-kms-demo/blob/main/frontend/index.html
+
+
+
+index.html에서 아래 라인의 API_GATEWAY_URL값을 이전 CDK 배포 후 Outputs의 InfraStack.ApiGatewayUrl 값으로 대체합니다. 
+
+```javascript
+const API_GATEWAY_URL = 'https://xxxxxxxxxx.execute-api.ap-northeast-2.amazonaws.com/prod/'
+```
+
+
 
 해당 Frontend 어플리케이션을 웹서버와 함께 실행합니다. 아래는 Mac 환경에서 python HTTP server를 실행하는 예제입니다. 
 
@@ -550,8 +615,14 @@ Serving HTTP on :: port 8000 (http://[::]:8000/) ...
 
 - API Gateway의 Initiate-upload API를 호출합니다. 이 때 initiateUpload lambda함수가 호출되어 S3 multi-part 업로드을 위한 Multi-part upload를 생성 (CreateMultipartUploadCommand)하고 client에서 S3로의 업로드을 위한 pre-signed URL을 생성합니다. 초기화 합니다. (CreateMultipartUploadCommand)
 - Pre-signed URL을 이용하여 S3로 파일을 업로드 합니다.
-- 업로드가 끝나면 API Gateway의 complete-upload API를 호출하여 Multi-part upload를 완료합니다. 이 때 S3 upload 완료 event에 따라 Amazon ECS Fargate task가 실행되어 code-signing 작업을 시작합니다. 
+- 업로드가 끝나면 API Gateway의 complete-upload API를 호출하여 Multi-part upload를 완료합니다. 이 때 S3 upload 완료 event에 따라 AWS Lambda가 실행되어 code-signing 작업을 시작합니다. 
 - API Gateway의 code-signing-status API를 polling하여 code-signing 작업이 완료되었는지를 check합니다. 작업이 완료되면 code-signing-status API는 code-sign된 파일이 저장된 S3 객체의 pre-signed URL값을 return합니다. 
 
 사용자는 이 URL을 click하여 해당 code-sign된 해당 binary를 다운로드 받을 수 있습니다.
+
+Ref)
+
+https://sbstjn.com/blog/aws-serverless-code-signing-windows-extended-validation-kms/
+
+https://aws.amazon.com/blogs/containers/aws-lambda-for-the-containers-developer/
 
